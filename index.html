@@ -38,7 +38,7 @@
   .popup-action { display: block; width: 100%; background: #00ffcc; color: #000; padding: 12px; border: none; border-radius: 50px; text-decoration: none; font-weight: 900; font-size: 14px; cursor: pointer; margin-bottom: 10px; }
   .popup-close { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #8ba2ad; padding: 8px 16px; border-radius: 50px; cursor: pointer; font-size: 12px; }
   .popup-close:hover { color: #fff; border-color: #fff; }
-  #status { position: fixed; bottom: 10px; left: 10px; font-size: 11px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 5px; color: #00ffcc; }
+  #status { position: fixed; bottom: 10px; left: 10px; font-size: 11px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 5px; color: #00ffcc; z-index: 1000; }
   #status:empty { display: none; }
 </style>
 </head>
@@ -93,6 +93,8 @@ var streamKeyId = "8e802e5373c59195ff0a9838814db6f4";
 var streamKeyVal = "d76ecf4be947c06874c1b57427f9e85b";
 
 var playerInstance = null;
+var currentServerIndex = 0;
+var serverButtons = [];
 
 function showStatus(txt) { document.getElementById('status').textContent = txt; }
 
@@ -114,16 +116,37 @@ function hideAllPopups() {
   document.getElementById('tg-popup-2').classList.remove('show');
 }
 
-async function loadStream(url) {
+async function loadStream(url, index) {
   if (!playerInstance) return;
-  showStatus('Switching server...');
+  currentServerIndex = index;
+  
+  serverButtons.forEach(b => b.classList.remove('active'));
+  if (serverButtons[index]) {
+    serverButtons[index].classList.add('active');
+  }
+
+  showStatus(`Connecting to S${index + 1}...`);
   try {
     await playerInstance.load(url);
-    if (playerInstance.isLive()) playerInstance.seek(playerInstance.seekRange().end);
+    if (playerInstance.isLive()) {
+      playerInstance.seek(playerInstance.seekRange().end);
+    }
     showStatus('');
   } catch (e) {
-    showStatus('Load failed');
+    console.error("Stream load failed on server S" + (index + 1), e);
+    switchToNextServer();
   }
+}
+
+function switchToNextServer() {
+  var nextIndex = (currentServerIndex + 1) % serverButtons.length;
+  if (nextIndex === currentServerIndex) {
+    showStatus('All servers failed');
+    return;
+  }
+  showStatus(`Switching to S${nextIndex + 1}...`);
+  var nextUrl = serverButtons[nextIndex].getAttribute('data-url');
+  loadStream(nextUrl, nextIndex);
 }
 
 async function initPlayer() {
@@ -137,21 +160,43 @@ async function initPlayer() {
   var keys = {};
   keys[streamKeyId] = streamKeyVal;
 
+  // Ultra low latency & aggressive zero-buffer recovery config
   playerInstance.configure({
-    streaming: { lowLatencyMode: true, bufferingGoal: 6, rebufferingGoal: 1 },
-    drm: { clearKeys: keys, preferredKeySystems: ['org.w3.clearkey'] }
+    streaming: {
+      lowLatencyMode: true,
+      inaccurateManifestTolerance: 0,
+      bufferingGoal: 2,
+      rebufferingGoal: 0.5,
+      bufferBehind: 15,
+      stallEnabled: true,
+      stallThreshold: 0.3,
+      retryParameters: {
+        maxAttempts: 2,
+        baseDelay: 500,
+        backoffFactor: 2,
+        timeout: 4000
+      }
+    },
+    drm: { 
+      clearKeys: keys, 
+      preferredKeySystems: ['org.w3.clearkey'] 
+    }
   });
 
-  var buttons = document.querySelectorAll('.server-btn');
-  buttons.forEach(btn => {
+  // Handle errors automatically to trigger failover/switch
+  playerInstance.addEventListener('error', function(event) {
+    console.warn("Shaka Player Error, attempting failover:", event.detail);
+    switchToNextServer();
+  });
+
+  serverButtons = document.querySelectorAll('.server-btn');
+  serverButtons.forEach((btn, idx) => {
     btn.onclick = function() {
-      buttons.forEach(b => b.classList.remove('active'));
-      this.classList.add('active');
-      loadStream(this.getAttribute('data-url'));
+      loadStream(this.getAttribute('data-url'), idx);
     };
   });
 
-  await loadStream(document.querySelector('.server-btn.active').getAttribute('data-url'));
+  await loadStream(serverButtons[0].getAttribute('data-url'), 0);
 }
 
 document.getElementById('shareBtn').onclick = async function() {
